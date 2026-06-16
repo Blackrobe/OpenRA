@@ -270,6 +270,12 @@ namespace OpenRA
 		[Desc("Set a frame rate limit of 1 render frame per game simulation frame (overrides CapFramerate/MaxFramerate).")]
 		public bool CapFramerateToGameFps = false;
 
+		[Desc("Experimental: retain the last rendered world and skip re-rendering it on frames where the",
+			"world has not advanced (paused, or between logic ticks), compositing the kept world buffer and",
+			"drawing only the UI/cursor on top. Foundation for threaded render decoupling. Client-local,",
+			"determinism-irrelevant. Caveat: camera scrolling refreshes at the logic-tick rate while this is on.")]
+		public bool DecoupledRendering = false;
+
 		[Desc("Disable the OpenGL debug message callback feature.")]
 		public bool DisableGLDebugMessageCallback = false;
 

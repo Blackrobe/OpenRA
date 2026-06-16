@@ -18,6 +18,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Runtime;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using OpenRA.Graphics;
 using OpenRA.Network;
@@ -89,6 +90,12 @@ namespace OpenRA
 
 		static void JoinInner(OrderManager om)
 		{
+			// Stage B: quiesce the background sim thread before disposing/replacing the global OrderManager. The
+			// direct JoinServer/JoinReplay entry points don't necessarily go through Disconnect() first, so a sim
+			// tick could be mid-TickWorld on the OrderManager about to be disposed. Runs on the main thread, so
+			// decoupling can't re-enable before the swap. No-op when decoupling is off.
+			StopSimTicking();
+
 			// Refresh static classes before the game starts.
 			TextNotificationsManager.Clear();
 			UnitOrders.Clear();
@@ -133,6 +140,49 @@ namespace OpenRA
 		public static long RunTime => Stopwatch.ElapsedMilliseconds;
 
 		public static int RenderFrame = 0;
+
+		// Stage B: serializes the sim thread's world tick against the main thread's world rendering / prepare.
+		// The main thread TryEnters it (never blocks); the sim thread holds it for the duration of a world tick.
+		static readonly object WorldAccessLock = new();
+
+		// Stage B: lets UI widgets (in other assemblies) read world state consistently. A widget TryEnters this
+		// lock around its world-reads; if the sim thread holds it (mid-tick), TryEnter returns false and the widget
+		// skips its refresh this frame, keeping its last consistent state instead of reading a half-updated world.
+		// It never blocks, so it does not reintroduce stutter. When decoupling is off the sim thread never holds
+		// the lock, so TryEnter always succeeds immediately and behaviour is unchanged.
+		public static bool TryEnterWorldReadLock()
+		{
+			return Monitor.TryEnter(WorldAccessLock);
+		}
+
+		// Blocking variant for INPUT handlers (one-shot events like a click, not per-frame refreshes): waits for
+		// the in-flight sim tick to finish, bounded by one tick duration. This matches the original single-threaded
+		// behaviour, where input handling also ran strictly between ticks - a click never raced the sim there either.
+		public static void EnterWorldReadLock()
+		{
+			Monitor.Enter(WorldAccessLock);
+		}
+
+		public static void ExitWorldReadLock()
+		{
+			Monitor.Exit(WorldAccessLock);
+		}
+
+		// True while the world simulation is being ticked on the background sim thread instead of inline on the
+		// main thread (threaded GL + DecoupledRendering + an in-progress game). Read by both threads.
+		internal static volatile bool decoupledRunning;
+
+		static Thread simThread;
+
+		// An unhandled exception on the sim thread would otherwise hard-terminate the process with no OpenRA log
+		// (the fatal-error handler only wraps the main thread). We capture it here and re-throw it on the main
+		// thread so it flows through the normal exception-logging / crash-dialog path.
+		static volatile ExceptionDispatchInfo simThreadException;
+
+		// TEMP DIAGNOSTIC (Stage B shellmap-stutter investigation) — remove after.
+		static long diagLastLogMs, diagLastTickMs;
+		static int diagTicks, diagMinIv = int.MaxValue, diagMaxIv, diagWorldFrames, diagUiFrames;
+
 		public static int NetFrameNumber => OrderManager.NetFrameNumber;
 		public static int LocalTick => OrderManager.LocalFrameNumber;
 
@@ -196,6 +246,12 @@ namespace OpenRA
 
 		internal static void StartGame(Map map, WorldType type)
 		{
+			// Stage B: stop the sim thread ticking the world we're about to dispose/replace (avoids a teardown race).
+			StopSimTicking();
+
+			// E-11: drop RunAfterTick callbacks captured against the old world/UI before we dispose it (see Disconnect).
+			delayedActions.Clear();
+
 			// Dispose of the old world before creating a new one.
 			worldRenderer?.Dispose();
 
@@ -489,6 +545,7 @@ namespace OpenRA
 
 			Ui.ResetAll();
 
+			StopSimTicking();
 			worldRenderer?.Dispose();
 			worldRenderer = null;
 			server?.Shutdown();
@@ -612,6 +669,17 @@ namespace OpenRA
 		public static void RunAfterTick(Action a) { delayedActions.Add(a, RunTime); }
 		public static void RunAfterDelay(int delayMilliseconds, Action a) { delayedActions.Add(a, RunTime + delayMilliseconds); }
 
+		// Stage B (DecoupledRendering): true when the world is ticked on the background sim thread (toggle on +
+		// threaded GL + in-progress game). When false the world ticks inline on the main thread (main IS the sim
+		// thread), so callbacks that must run "on the sim thread" can run inline instead of being marshaled.
+		public static bool IsDecoupledRunning => decoupledRunning;
+
+		// Stage B (DecoupledRendering): true on the main (render/UI/input) thread, false on the background sim
+		// thread. Sim-thread code that must touch main-thread-only state (the widget tree, order generators, Lua UI
+		// globals) checks this and marshals the mutation via RunAfterTick. True before ModData exists (startup is on
+		// the main thread). Public so OpenRA.Mods.Common can reach it (ModData.IsOnMainThread is internal).
+		public static bool IsOnMainThread => ModData == null || ModData.IsOnMainThread;
+
 		static void TakeScreenshotInner()
 		{
 			using (new PerfTimer("Renderer.SaveScreenshot"))
@@ -629,10 +697,22 @@ namespace OpenRA
 			}
 		}
 
-		static void InnerLogicTick(OrderManager orderManager)
+		static void InnerLogicTick(OrderManager orderManager, bool tickWorld = true)
 		{
+			// Split into the UI half and the world/simulation half. They are independent (gated on separate
+			// LastTickTimes) and target different threads under Stage B (DecoupledRendering): TickUi stays on
+			// the main render+UI+input thread, TickWorld moves to the background sim thread. Computed from a
+			// single 'tick' timestamp so the split is behaviour-identical to the previous combined method.
+			// When tickWorld is false the world is ticked elsewhere (the sim thread), so only UI is advanced here.
 			var tick = RunTime;
+			TickUi(orderManager, tick);
+			if (tickWorld)
+				TickWorld(orderManager, tick);
+		}
 
+		// UI + cursor ticking. Stage B: runs on the main (render+UI+input) thread.
+		static void TickUi(OrderManager orderManager, long tick)
+		{
 			var world = orderManager.World;
 
 			if (Ui.LastTickTime.ShouldAdvance(tick))
@@ -641,6 +721,12 @@ namespace OpenRA
 				Sync.RunUnsynced(world, Ui.Tick);
 				Cursor.Tick();
 			}
+		}
+
+		// Order processing + world simulation. Stage B: runs on the background sim thread.
+		static void TickWorld(OrderManager orderManager, long tick)
+		{
+			var world = orderManager.World;
 
 			if (orderManager.LastTickTime.ShouldAdvance(tick))
 			{
@@ -690,9 +776,89 @@ namespace OpenRA
 				ConnectionStateChanged(OrderManager, null, nc);
 			}
 
-			InnerLogicTick(OrderManager);
+			// Stage B (DecoupledRendering): the world simulation is ticked on the background sim thread, so the
+			// main thread only advances UI here. Otherwise (default) tick UI + world inline as before.
+			var tickWorldInline = !decoupledRunning;
+			InnerLogicTick(OrderManager, tickWorldInline);
 			if (worldRenderer != null && OrderManager.World != worldRenderer.World)
-				InnerLogicTick(worldRenderer.World.OrderManager);
+				InnerLogicTick(worldRenderer.World.OrderManager, tickWorldInline);
+		}
+
+		// Stage B background sim thread: ticks ONLY the world simulation (TickWorld), serialized against the
+		// main thread's world rendering via WorldAccessLock. Runs for the app lifetime; only does work while
+		// decoupledRunning (threaded GL + DecoupledRendering + an in-progress game). When it is not running,
+		// the main thread ticks the world inline as usual, so there is never a double tick. TickWorld self-gates
+		// on LastTickTime, so the lock is held only for the duration of an actual tick.
+		static void SimThreadLoop()
+		{
+			while (state == RunStatus.Running)
+			{
+				// Only take the lock when a world tick is actually due. TickWorld self-gates on LastTickTime, but
+				// checking that INSIDE the lock would mean acquiring it every iteration (~1ms), which starves the
+				// main thread's TryEnter and causes render stutter. So peek lock-free here, then re-check
+				// decoupledRunning under the lock so a world teardown (StopSimTicking) can't race a tick.
+				if (decoupledRunning && OrderManager.LastTickTime.ShouldAdvance(RunTime))
+				{
+					// TEMP DIAGNOSTIC: record the interval between actual tick-attempts (reveals sim-thread timing jitter).
+					var nowMs = RunTime;
+					if (diagLastTickMs != 0)
+					{
+						var iv = (int)(nowMs - diagLastTickMs);
+						if (iv < diagMinIv) diagMinIv = iv;
+						if (iv > diagMaxIv) diagMaxIv = iv;
+					}
+
+					diagLastTickMs = nowMs;
+					diagTicks++;
+
+					try
+					{
+						lock (WorldAccessLock)
+						{
+							if (decoupledRunning)
+							{
+								var tick = RunTime;
+								var om = OrderManager;
+								var wr = worldRenderer;
+								if (om.World != null)
+									TickWorld(om, tick);
+								if (wr != null && om.World != wr.World && wr.World != null)
+									TickWorld(wr.World.OrderManager, tick);
+							}
+						}
+					}
+					catch (Exception e)
+					{
+						// Hand the exception to the main thread, which re-throws it into the normal fatal-error path
+						// (exception log + crash dialog). Stop ticking so we don't spin on a broken world.
+						simThreadException = ExceptionDispatchInfo.Capture(e);
+						decoupledRunning = false;
+						return;
+					}
+				}
+
+				// TEMP DIAGNOSTIC: once-per-second summary to debug.log.
+				if (RunTime - diagLastLogMs > 1000)
+				{
+					Log.Write("debug", $"[DECOUPLE-DIAG] decoupled={decoupledRunning} ticks/s={diagTicks} " +
+						$"iv={(diagMinIv == int.MaxValue ? 0 : diagMinIv)}-{diagMaxIv}ms world/s={diagWorldFrames} uiOnly/s={diagUiFrames}");
+					diagLastLogMs = RunTime;
+					diagTicks = 0; diagMinIv = int.MaxValue; diagMaxIv = 0; diagWorldFrames = 0; diagUiFrames = 0;
+				}
+
+				// Yield so we don't busy-spin between ticks.
+				Thread.Sleep(1);
+			}
+		}
+
+		// Stage B: stop the background sim thread from ticking the world before it is disposed or swapped.
+		// Setting decoupledRunning=false prevents any new tick from starting; taking WorldAccessLock once is a
+		// barrier that waits out a tick already in progress. After this returns, the main thread can safely
+		// dispose/replace the world; decoupledRunning is recomputed by the loop once a new game is in progress.
+		static void StopSimTicking()
+		{
+			decoupledRunning = false;
+			lock (WorldAccessLock) { }
 		}
 
 		public static void PerformDelayedActions()
@@ -717,26 +883,55 @@ namespace OpenRA
 				if (worldRenderer != null)
 					worldRenderer.World.IsRenderTick = true;
 
+				// worldRenderer is null during the initial install/download screen; world rendering is disabled
+				// while the loading screen is displayed.
+				var canDrawWorld = worldRenderer != null && !worldRenderer.World.IsLoadingGameSave;
+
+				// drawWorld stays false on a decoupled UI-only frame (the sim thread was mid-tick so we couldn't
+				// take the world lock); we then keep the world buffer from a previous frame and refresh only the UI.
+				var drawWorld = false;
+
 				// Prepare renderables (i.e. render voxels) before calling BeginFrame
 				using (new PerfSample("render_prepare"))
 				{
 					worldRenderer?.BeginFrame();
 
-					// World rendering is disabled while the loading screen is displayed
-					if (worldRenderer != null && !worldRenderer.World.IsLoadingGameSave)
+					if (canDrawWorld)
 					{
-						worldRenderer.Viewport.Tick();
-						worldRenderer.PrepareRenderables();
+						// Stage B: hold WorldAccessLock ONLY around the world-reading prepare — NOT the later
+						// Draw/present/vsync. Holding it across the whole render starved the sim thread for whole
+						// frames (measured tick gaps up to 124ms -> lurchy motion). TryEnter never blocks: if the
+						// sim is mid-tick we skip world prepare this frame and fall back to a UI-only frame.
+						if (!decoupledRunning)
+						{
+							worldRenderer.Viewport.Tick();
+							worldRenderer.PrepareRenderables();
+							drawWorld = true;
+						}
+						else if (Monitor.TryEnter(WorldAccessLock))
+						{
+							try
+							{
+								worldRenderer.Viewport.Tick();
+								worldRenderer.PrepareRenderables();
+								drawWorld = true;
+							}
+							finally
+							{
+								Monitor.Exit(WorldAccessLock);
+							}
+						}
 					}
 
 					Ui.PrepareRenderables();
 					worldRenderer?.EndFrame();
 				}
 
-				// worldRenderer is null during the initial install/download screen
-				// World rendering is disabled while the loading screen is displayed
+				// TEMP DIAGNOSTIC: count world vs UI-only frames.
+				if (drawWorld) diagWorldFrames++; else diagUiFrames++;
+
 				// Use worldRenderer.World instead of OrderManager.World to avoid a rendering mismatch while processing orders
-				if (worldRenderer != null && !worldRenderer.World.IsLoadingGameSave)
+				if (drawWorld)
 				{
 					Renderer.BeginWorld(worldRenderer.Viewport.CenterLocation, worldRenderer.Viewport.ViewportSize);
 					Sound.SetListenerPosition(worldRenderer.Viewport.CenterPosition);
@@ -746,7 +941,7 @@ namespace OpenRA
 
 				using (new PerfSample("render_widgets"))
 				{
-					Renderer.BeginUI();
+					Renderer.BeginUI(compositeRetainedWorld: !drawWorld);
 
 					if (worldRenderer != null && !worldRenderer.World.IsLoadingGameSave)
 						worldRenderer.DrawAnnotations();
@@ -829,8 +1024,22 @@ namespace OpenRA
 			var forcedNextRender = RunTime;
 			var renderBeforeNextTick = false;
 
+			// Stage B: start the background sim thread. It only ticks the world while decoupledRunning is set
+			// (threaded GL + DecoupledRendering + an in-progress game); otherwise it idles and the main thread
+			// ticks the world inline as usual.
+			simThread = new Thread(SimThreadLoop)
+			{
+				Name = "Cameo Sim Thread",
+				IsBackground = true
+			};
+			simThread.Start();
+
 			while (state == RunStatus.Running)
 			{
+				// Re-throw any exception the sim thread captured, so it flows through the normal main-thread
+				// fatal-error path (exception log + crash dialog) instead of vanishing.
+				simThreadException?.Throw();
+
 				var logicInterval = Ui.Timestep;
 				var logicWorld = worldRenderer?.World;
 
@@ -854,6 +1063,24 @@ namespace OpenRA
 				}
 
 				var now = RunTime;
+
+				// Stage B: decide whether the world is ticked on the sim thread this iteration. Requires a threaded
+				// GL context (so the sim and render threads can both feed the GL queue), the setting enabled, and
+				// an in-progress game. When false, the main thread ticks the world inline (default behaviour).
+				var shouldDecouple = Settings.Graphics.DecoupledRendering
+					&& Renderer.Context.IsThreaded
+					&& OrderManager.World != null
+					&& OrderManager.GameStarted
+					&& !OrderManager.World.IsLoadingGameSave;
+
+				// On the true->false edge (toggle off mid-game, game end, save load) a sim tick may still be in
+				// flight under WorldAccessLock. Barrier it out BEFORE the main thread resumes inline ticking, or the
+				// two threads can run World.Tick (RNG, orders, sync) concurrently. StopSimTicking sets the flag false
+				// and waits out the in-flight tick. The false->true edge needs no barrier (nothing is in flight).
+				if (decoupledRunning && !shouldDecouple)
+					StopSimTicking();
+				else
+					decoupledRunning = shouldDecouple;
 
 				// If the logic has fallen behind too much, skip it and catch up
 				if (now - nextLogic > MaxLogicTicksBehind)
@@ -883,7 +1110,11 @@ namespace OpenRA
 						if (isTimeToRender || forceRender)
 						{
 							if (haveSomeTimeUntilNextLogic || forceRender)
+							{
+								// Stage B: RenderTick takes the world lock itself, only around the world-reading prepare phase
+								// (not the whole render), so a slow render frame can't starve the sim thread.
 								RenderTick();
+							}
 
 							nextRender = now + renderInterval;
 
@@ -938,6 +1169,11 @@ namespace OpenRA
 			}
 			finally
 			{
+				// Stage B: stop the background sim thread BEFORE disposing OrderManager. If Loop() threw on the main
+				// thread, a sim tick may still be mid-TickWorld touching OrderManager/world/global state; the barrier
+				// in StopSimTicking waits it out. Loop() has exited, so nothing re-enables decoupledRunning here.
+				StopSimTicking();
+
 				// Ensure that the active replay is properly saved
 				OrderManager?.Dispose();
 			}
@@ -961,6 +1197,20 @@ namespace OpenRA
 
 		public static void Disconnect()
 		{
+			// Stage B: quiesce the background sim thread before tearing down the world. Restart()/leave call this
+			// mid-game with decoupledRunning still true (shouldDecouple does not gate on game-over), so a sim tick
+			// could be mid-TickWorld on the very world/OrderManager about to be disposed. StopSimTicking() barriers
+			// out the in-flight tick first; this runs on the main thread, so nothing re-enables decoupling before the
+			// disposes below. No-op when decoupling is off.
+			StopSimTicking();
+
+			// E-11: drop any callbacks queued via RunAfterTick (marshaled notifications / SelectionChanged / mission
+			// text / GameOver UI) before we dispose the world/UI. They captured the OLD world/widgets and would
+			// otherwise fire in a later LogicTick against disposed state (Restart/leave reaches here, then Ui.ResetAll).
+			// Safe: the sim is quiesced by the barrier above, so nothing is concurrently enqueuing, and these are
+			// display-only client callbacks.
+			delayedActions.Clear();
+
 			OrderManager.World?.TraitDict.PrintReport();
 
 			OrderManager.Dispose();

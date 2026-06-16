@@ -57,6 +57,11 @@ namespace OpenRA.Network
 		readonly List<Order> localOrders = [];
 		readonly List<Order> localImmediateOrders = [];
 
+		// Guards the two local order lists. Under Stage B (DecoupledRendering) orders are PRODUCED on the main
+		// (input) thread via IssueOrder and CONSUMED/sent on the background sim thread, so the lists are shared
+		// across threads. Uncontended in the single-threaded path.
+		readonly object localOrdersSync = new();
+
 		readonly List<ClientOrder> processClientOrders = [];
 		readonly List<int> processClientsToRemove = [];
 
@@ -131,17 +136,23 @@ namespace OpenRA.Network
 
 		public void IssueOrder(Order order)
 		{
-			if (order.IsImmediate)
-				localImmediateOrders.Add(order);
-			else
-				localOrders.Add(order);
+			lock (localOrdersSync)
+			{
+				if (order.IsImmediate)
+					localImmediateOrders.Add(order);
+				else
+					localOrders.Add(order);
+			}
 		}
 
 		void SendImmediateOrders()
 		{
-			if (localImmediateOrders.Count != 0 && GameSaveLastFrame < NetFrameNumber)
-				Connection.SendImmediate(localImmediateOrders);
-			localImmediateOrders.Clear();
+			lock (localOrdersSync)
+			{
+				if (localImmediateOrders.Count != 0 && GameSaveLastFrame < NetFrameNumber)
+					Connection.SendImmediate(localImmediateOrders);
+				localImmediateOrders.Clear();
+			}
 		}
 
 		public void ReceiveDisconnect(int clientId, int frame)
@@ -225,8 +236,12 @@ namespace OpenRA.Network
 		{
 			if (GameStarted && GameSaveLastFrame < NetFrameNumber && sentOrdersFrame < NetFrameNumber)
 			{
-				Connection.Send(NetFrameNumber, localOrders);
-				localOrders.Clear();
+				lock (localOrdersSync)
+				{
+					Connection.Send(NetFrameNumber, localOrders);
+					localOrders.Clear();
+				}
+
 				sentOrdersFrame = NetFrameNumber;
 			}
 		}
