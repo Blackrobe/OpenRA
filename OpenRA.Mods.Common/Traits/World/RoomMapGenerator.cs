@@ -20,7 +20,7 @@ using OpenRA.Traits;
 namespace OpenRA.Mods.Common.Traits
 {
 	[TraitLocation(SystemActors.EditorWorld)]
-	[Desc("A map generator that lays out rooms connected by corridors, with a central battle room.")]
+	[Desc("A map generator that lays out rooms connected by corridors, with player rooms evenly spaced around a ring.")]
 	public sealed class RoomMapGeneratorInfo : TraitInfo, IEditorMapGeneratorInfo
 	{
 		[FieldLoader.Require]
@@ -114,43 +114,45 @@ namespace OpenRA.Mods.Common.Traits
 			public readonly int MinRoomSize = default;
 			public readonly int MaxRoomSize = default;
 
-			[Desc("Number of candidate rooms to try placing. Overlapping candidates are discarded.")]
+			[Desc("Hard safety cap on total room placement attempts.")]
 			public readonly int RoomAttempts = default;
+
+			[Desc("Stop placing rooms after this many consecutive failed attempts (packs the map as full as it will go).")]
+			public readonly int MaxConsecutiveFailures = default;
 
 			[Desc("Minimum gap (in cells) kept between two rooms so a wall always separates them.")]
 			public readonly int RoomGap = default;
 
-			[Desc("Side length of the single central battle room.")]
-			public readonly int BattleRoomSize = default;
+			[Desc("Radius of the ring that player rooms are evenly spaced around, as a percentage of the usable half-extent of the map.")]
+			public readonly int SpawnRingRadiusPercent = default;
+
+			[Desc("Attempts to resolve an overlap when nudging a player room into place on the spawn ring.")]
+			public readonly int SpawnRoomAttempts = default;
+
+			[Desc("Width (in cells) of carved corridors, randomized per corridor between these two values.")]
+			public readonly int CorridorMinWidth = default;
+			public readonly int CorridorMaxWidth = default;
 
 			public readonly ushort FloorTile = default;
 			public readonly ushort WallTile = default;
 
-			[Desc("Room floor area (in cells) required per placed resource driller.")]
-			public readonly int DrillerAreaDivisor = default;
+			[Desc("Solid backdrop tile filling all space outside rooms/corridors and their wall shell.")]
+			public readonly ushort VoidTile = default;
+
+			[Desc("Actor type for the ore driller (\"Ore mine\").")]
+			public readonly string OreMineActor = default;
+
+			[Desc("Actor type for the gem driller (\"Gem mine\").")]
+			public readonly string GemMineActor = default;
 
 			public readonly int SpawnMinimumRadius = default;
 			public readonly int SpawnMaximumRadius = default;
 			public readonly int SpawnZoneRadius = default;
 			public readonly int SpawnCentralReservationFraction = default;
 
-			[FieldLoader.LoadUsing(nameof(DrillerWeightsLoader))]
-			public readonly IReadOnlyDictionary<string, int> DrillerWeights = default;
-
 			public Parameters(MiniYaml my)
 			{
 				FieldLoader.Load(this, my);
-			}
-
-			static object DrillerWeightsLoader(MiniYaml my)
-			{
-				return my.NodeWithKey("DrillerWeights").Value.ToDictionary(subMy =>
-				{
-					if (Exts.TryParseInt32Invariant(subMy.Value, out var f))
-						return f;
-					else
-						throw new YamlException($"Invalid driller weight `{subMy.Value}`");
-				});
 			}
 		}
 
@@ -170,6 +172,9 @@ namespace OpenRA.Mods.Common.Traits
 			if (!terrainInfo.TryGetTerrainInfo(new TerrainTile(param.WallTile, 0), out _))
 				throw new MapGenerationException("Illegal WallTile");
 
+			if (!terrainInfo.TryGetTerrainInfo(new TerrainTile(param.VoidTile, 0), out _))
+				throw new MapGenerationException("Illegal VoidTile");
+
 			// No mirror/rotation symmetry yet - see follow-up note in project memory.
 			var terraformer = new Terraformer(args, map, modData, actorPlans, Symmetry.Mirror.None, 1);
 
@@ -181,9 +186,11 @@ namespace OpenRA.Mods.Common.Traits
 
 			terraformer.InitMap();
 
-			// Start fully solid; rooms and corridors are carved out of it below.
+			// Start fully solid with an impassable void backdrop; rooms/corridors get a wall
+			// shell carved around them below, mirroring how classic RA interior missions render
+			// black outside of walked space instead of tiling a wall texture everywhere.
 			foreach (var mpos in map.AllCells.MapCoords)
-				map.Tiles[mpos] = terraformer.PickTile(pickAnyRandom, param.WallTile);
+				map.Tiles[mpos] = terraformer.PickTile(pickAnyRandom, param.VoidTile);
 
 			var floor = new CellLayer<bool>(map);
 
@@ -202,22 +209,55 @@ namespace OpenRA.Mods.Common.Traits
 			var maxX = size.Width - param.Margin;
 			var maxY = size.Height - param.Margin;
 
-			// Reserve the central battle room first, so every other room forms around it.
-			var battleSize = param.BattleRoomSize;
-			var battleRoom = new Room(
-				(size.Width - battleSize) / 2,
-				(size.Height - battleSize) / 2,
-				battleSize,
-				battleSize);
+			// Place player rooms first, evenly spaced around a ring so every player has a
+			// consistent distance to their neighbours (and to the map center). Everything else
+			// is filled in afterwards by ordinary room generation - see project memory for why
+			// there's no more a distinct "central battle room".
+			var centerX = size.Width / 2;
+			var centerY = size.Height / 2;
+			var ringRadius = Math.Min(centerX - minX, centerY - minY) * param.SpawnRingRadiusPercent / 100;
+			var angleOffset = layoutRandom.NextFloat() * 2 * MathF.PI;
 
-			var rooms = new List<Room> { battleRoom };
+			var rooms = new List<Room>();
 
-			for (var attempt = 0; attempt < param.RoomAttempts; attempt++)
+			for (var p = 0; p < param.Players; p++)
 			{
+				var angle = angleOffset + p * (2 * MathF.PI / param.Players);
+				var targetX = centerX + (int)(ringRadius * MathF.Cos(angle));
+				var targetY = centerY + (int)(ringRadius * MathF.Sin(angle));
+
+				Room? placed = null;
+				for (var attempt = 0; attempt < param.SpawnRoomAttempts && placed == null; attempt++)
+				{
+					var w = layoutRandom.Next(param.MinRoomSize, param.MaxRoomSize + 1);
+					var h = layoutRandom.Next(param.MinRoomSize, param.MaxRoomSize + 1);
+					var jitter = attempt == 0 ? 0 : param.MaxRoomSize;
+					var x = Math.Clamp(targetX - w / 2 + layoutRandom.Next(-jitter, jitter + 1), minX, maxX - w);
+					var y = Math.Clamp(targetY - h / 2 + layoutRandom.Next(-jitter, jitter + 1), minY, maxY - h);
+
+					var candidate = new Room(x, y, w, h);
+					if (!rooms.Any(r => r.TooCloseTo(candidate, param.RoomGap)))
+						placed = candidate;
+				}
+
+				rooms.Add(placed ?? throw new MapGenerationException("Not enough room for player spawns"));
+			}
+
+			// Keep placing ordinary rooms until the map won't take any more, rather than stopping
+			// at a fixed attempt count - this packs the available space as full as it will go.
+			var consecutiveFailures = 0;
+			var totalAttempts = 0;
+			while (consecutiveFailures < param.MaxConsecutiveFailures && totalAttempts < param.RoomAttempts)
+			{
+				totalAttempts++;
+
 				var w = layoutRandom.Next(param.MinRoomSize, param.MaxRoomSize + 1);
 				var h = layoutRandom.Next(param.MinRoomSize, param.MaxRoomSize + 1);
 				if (maxX - w <= minX || maxY - h <= minY)
+				{
+					consecutiveFailures++;
 					continue;
+				}
 
 				var candidate = new Room(
 					layoutRandom.Next(minX, maxX - w),
@@ -226,13 +266,14 @@ namespace OpenRA.Mods.Common.Traits
 					h);
 
 				if (rooms.Any(r => r.TooCloseTo(candidate, param.RoomGap)))
+				{
+					consecutiveFailures++;
 					continue;
+				}
 
 				rooms.Add(candidate);
+				consecutiveFailures = 0;
 			}
-
-			if (rooms.Count < param.Players + 1)
-				throw new MapGenerationException("Not enough room for the interior layout");
 
 			foreach (var room in rooms)
 				for (var y = room.Y; y < room.Y + room.H; y++)
@@ -264,78 +305,165 @@ namespace OpenRA.Mods.Common.Traits
 					var b = rooms[bestTo].Center;
 					var corner = layoutRandom.Next(2) == 0 ? new CPos(b.X, a.Y) : new CPos(a.X, b.Y);
 
-					void CarveLine(CPos from, CPos to)
-					{
-						var x = from.X;
-						var y = from.Y;
-						while (true)
-						{
-							CarveFloor(x, y);
-							if (x == to.X && y == to.Y)
-								break;
+					var corridorWidth = layoutRandom.Next(param.CorridorMinWidth, param.CorridorMaxWidth + 1);
 
-							if (x != to.X)
-								x += Math.Sign(to.X - x);
-							else
-								y += Math.Sign(to.Y - y);
+					// Carve a corridor segment (always axis-aligned, since `corner` shares one
+					// coordinate with both `from` and `to`) as a band `corridorWidth` cells thick.
+					void CarveThickLine(CPos from, CPos to)
+					{
+						var half = (corridorWidth - 1) / 2;
+						var extra = corridorWidth - 1 - half;
+						if (from.Y == to.Y)
+						{
+							for (var offset = -half; offset <= extra; offset++)
+							{
+								var x = from.X;
+								while (true)
+								{
+									CarveFloor(x, from.Y + offset);
+									if (x == to.X)
+										break;
+									x += Math.Sign(to.X - x);
+								}
+							}
+						}
+						else
+						{
+							for (var offset = -half; offset <= extra; offset++)
+							{
+								var y = from.Y;
+								while (true)
+								{
+									CarveFloor(from.X + offset, y);
+									if (y == to.Y)
+										break;
+									y += Math.Sign(to.Y - y);
+								}
+							}
 						}
 					}
 
-					CarveLine(a, corner);
-					CarveLine(corner, b);
+					CarveThickLine(a, corner);
+					CarveThickLine(corner, b);
 
 					connected.Add(bestTo);
 					remaining.Remove(bestTo);
 				}
 			}
 
-			// Player spawns: peripheral rooms only, never inside the central battle room.
-			var spawnZoneable = new CellLayer<bool>(map);
-			foreach (var mpos in map.AllCells.MapCoords)
+			// Carve a one-cell wall shell around every floor cell that borders the void, so
+			// rooms/corridors read as walled rather than dissolving straight into black.
 			{
-				var cpos = mpos.ToCPos(map.Grid.Type);
-				spawnZoneable[mpos] = floor[mpos] && !battleRoom.Contains(cpos.X, cpos.Y);
-			}
+				(int DX, int DY)[] neighbors =
+				[
+					(-1, -1), (0, -1), (1, -1),
+					(-1, 0), (1, 0),
+					(-1, 1), (0, 1), (1, 1),
+				];
 
-			for (var i = 0; i < param.Players; i++)
-			{
-				var chosenCPos = terraformer.ChooseSpawnInZoneable(
-					spawnRandom,
-					spawnZoneable,
-					param.SpawnCentralReservationFraction,
-					param.SpawnMinimumRadius,
-					param.SpawnMaximumRadius,
-					param.SpawnZoneRadius)
-						?? throw new MapGenerationException("Not enough room for player spawns");
-
-				var spawn = new ActorPlan(map, "mpspawn") { Location = chosenCPos };
-				terraformer.ProjectPlaceDezoneActor(spawn, spawnZoneable, new WDist(param.SpawnZoneRadius * 1024));
-			}
-
-			// Resource driller clusters: skip the battle room (index 0), scale count by room area.
-			for (var r = 1; r < rooms.Count; r++)
-			{
-				var room = rooms[r];
-				var targetCount = Math.Max(1, room.Area / param.DrillerAreaDivisor);
-
-				var roomZoneable = new CellLayer<bool>(map);
 				foreach (var mpos in map.AllCells.MapCoords)
 				{
+					if (!floor[mpos])
+						continue;
+
 					var cpos = mpos.ToCPos(map.Grid.Type);
-					roomZoneable[mpos] = room.Contains(cpos.X, cpos.Y);
+					foreach (var (dx, dy) in neighbors)
+					{
+						var neighborCPos = new CPos(cpos.X + dx, cpos.Y + dy);
+						if (!map.Contains(neighborCPos))
+							continue;
+
+						var neighborMPos = neighborCPos.ToMPos(map);
+						if (!floor[neighborMPos])
+							map.Tiles[neighborMPos] = terraformer.PickTile(pickAnyRandom, param.WallTile);
+					}
 				}
+			}
 
-				terraformer.ZoneFromActors(roomZoneable, false);
+			// Rooms 0..Players-1 are the player rooms placed on the spawn ring above; they get
+			// exactly one ore mine + one gem mine. Every other room gets either one gem mine or
+			// two ore mines.
+			// Only touch the room's own footprint, not the whole map - these run once per room,
+			// and rooms.Count * map area quickly gets expensive on large maps.
+			CellLayer<bool> RoomZoneable(Room room)
+			{
+				var zoneable = new CellLayer<bool>(map);
+				zoneable.Clear(false);
+				for (var y = room.Y; y < room.Y + room.H; y++)
+					for (var x = room.X; x < room.X + room.W; x++)
+					{
+						var cpos = new CPos(x, y);
+						if (map.Contains(cpos))
+							zoneable[cpos.ToMPos(map)] = true;
+					}
 
-				var distribution = CellLayerUtils.Create(map, (MPos mpos) => roomZoneable[mpos] ? 1 : 0);
+				terraformer.ZoneFromActors(zoneable, false);
+				return zoneable;
+			}
 
-				terraformer.AddDistributedActors(
-					drillerRandom,
-					roomZoneable,
-					distribution,
-					param.DrillerWeights,
-					targetCount,
-					true);
+			// Placing 1-2 fixed-type actors directly within a known small room is cheap; the
+			// general Terraformer.AddDistributedActors path scans the whole map per call, which
+			// gets expensive multiplied over every room on a large map.
+			void AddMines(Room room, string actorType, int count)
+			{
+				const int MinSpacingSquared = 9; // 3 cells apart
+				var placed = new List<CPos>();
+				for (var n = 0; n < count; n++)
+				{
+					CPos? chosen = null;
+					for (var attempt = 0; attempt < 30 && chosen == null; attempt++)
+					{
+						var x = drillerRandom.Next(room.X + 1, room.X + room.W - 1);
+						var y = drillerRandom.Next(room.Y + 1, room.Y + room.H - 1);
+						var candidate = new CPos(x, y);
+						if (!map.Contains(candidate))
+							continue;
+						if (placed.Any(p => (p - candidate).LengthSquared < MinSpacingSquared))
+							continue;
+						chosen = candidate;
+					}
+
+					if (chosen == null)
+						continue;
+
+					var actorPlan = new ActorPlan(map, actorType)
+					{
+						WPosCenterLocation = CellLayerUtils.CPosToWPos(chosen.Value, map.Grid.Type),
+					};
+					terraformer.ProjectPlaceDezoneActor(actorPlan);
+					placed.Add(chosen.Value);
+				}
+			}
+
+			for (var r = 0; r < rooms.Count; r++)
+			{
+				var room = rooms[r];
+				var zoneable = RoomZoneable(room);
+
+				if (r < param.Players)
+				{
+					var chosenCPos = terraformer.ChooseSpawnInZoneable(
+						spawnRandom,
+						zoneable,
+						param.SpawnCentralReservationFraction,
+						param.SpawnMinimumRadius,
+						param.SpawnMaximumRadius,
+						param.SpawnZoneRadius)
+							?? throw new MapGenerationException("Not enough room for player spawns");
+
+					var spawn = new ActorPlan(map, "mpspawn") { Location = chosenCPos };
+					terraformer.ProjectPlaceDezoneActor(spawn, zoneable, new WDist(param.SpawnZoneRadius * 1024));
+
+					AddMines(room, param.GemMineActor, 1);
+					AddMines(room, param.OreMineActor, 1);
+				}
+				else
+				{
+					if (drillerRandom.Next(2) == 0)
+						AddMines(room, param.GemMineActor, 1);
+					else
+						AddMines(room, param.OreMineActor, 2);
+				}
 			}
 
 			terraformer.ReorderPlayerSpawns();

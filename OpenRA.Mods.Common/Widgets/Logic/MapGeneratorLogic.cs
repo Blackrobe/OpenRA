@@ -60,6 +60,12 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 		const string MapSizeHuge = "label-map-size-huge";
 
 		[FluentReference]
+		const string MapSizeMassive = "label-map-size-massive";
+
+		[FluentReference]
+		const string MapSizeGigantic = "label-map-size-gigantic";
+
+		[FluentReference]
 		const string BlueprintCopy = "button-mapchooser-blueprint-copy";
 
 		[FluentReference]
@@ -80,6 +86,8 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 			{ MapSizeMedium, new int2(60, 90) },
 			{ MapSizeLarge, new int2(90, 120) },
 			{ MapSizeHuge, new int2(120, 160) },
+			{ MapSizeMassive, new int2(192, 256) },
+			{ MapSizeGigantic, new int2(320, 512) },
 		};
 
 		readonly ModData modData;
