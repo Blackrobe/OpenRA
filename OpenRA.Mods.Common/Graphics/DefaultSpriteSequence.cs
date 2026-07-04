@@ -44,8 +44,9 @@ namespace OpenRA.Mods.Common.Graphics
 				{
 					try
 					{
+						// Parse metadata only. Sprite reservation (and the file decode it drives) is deferred until
+						// SequenceSet.LoadImages reserves this image, so callers can load a subset of images on demand.
 						var sequence = CreateSequence(modData, tileset, cache, imageNode.Key, sequenceNode.Key, sequenceNode.Value, defaults);
-						((DefaultSpriteSequence)sequence).ReserveSprites(modData, tileset, cache, sequenceNode.Value, defaults);
 						sequences.Add(sequenceNode.Key, sequence);
 					}
 					catch (Exception e)
@@ -191,6 +192,12 @@ namespace OpenRA.Mods.Common.Graphics
 
 		protected string image;
 		protected List<SpriteReservation> spritesToLoad = [];
+
+		// Retained from parse so reservation can be deferred until the owning image is loaded on demand.
+		MiniYaml reserveData;
+		MiniYaml reserveDefaults;
+		bool reserved;
+
 		protected Sprite[] sprites;
 		protected Sprite[] shadowSprites;
 		protected bool reverseFacings;
@@ -366,6 +373,8 @@ namespace OpenRA.Mods.Common.Graphics
 			this.image = image;
 			Name = sequence;
 			Loader = loader;
+			reserveData = data;
+			reserveDefaults = defaults;
 
 			start = LoadField(Start, data, defaults);
 
@@ -433,6 +442,15 @@ namespace OpenRA.Mods.Common.Graphics
 
 			if (alphaFade && alpha != null)
 				throw new YamlException($"{alphaFadeLocation}: {AlphaFade.Key} cannot be used with {Alpha.Key}.");
+		}
+
+		public void Reserve(ModData modData, string tileset, SpriteCache cache)
+		{
+			if (reserved)
+				return;
+
+			reserved = true;
+			ReserveSprites(modData, tileset, cache, reserveData, reserveDefaults);
 		}
 
 		public virtual void ReserveSprites(ModData modData, string tileset, SpriteCache cache, MiniYaml data, MiniYaml defaults)

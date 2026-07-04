@@ -76,6 +76,7 @@ namespace OpenRA.Mods.Common.UtilityCommands
 				throw new InvalidOperationException(
 					$"Image `{image}` has no sequence `{sequenceName}`. Defined: {string.Join(", ", seqs.Keys)}");
 
+			seq.Reserve(modData, tileset, cache);
 			cache.LoadReservations(modData);
 			seq.ResolveSprites(cache);
 

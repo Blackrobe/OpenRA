@@ -27,6 +27,7 @@ namespace OpenRA.Graphics
 		Rectangle Bounds { get; }
 		bool IgnoreWorldTint { get; }
 		float Scale { get; }
+		void Reserve(ModData modData, string tileset, SpriteCache cache);
 		void ResolveSprites(SpriteCache cache);
 		Sprite GetSprite(int frame);
 		Sprite GetSprite(int frame, WAngle facing);
@@ -105,12 +106,53 @@ namespace OpenRA.Graphics
 			return images;
 		}
 
+		readonly HashSet<string> loadedImages = [];
+
 		public void LoadSprites()
 		{
+			LoadImages(images.Keys);
+		}
+
+		// Incrementally load sprites for a subset of images. Images already loaded are skipped, so this can be
+		// called repeatedly to append art after the initial pass: each call reserves only the not-yet-loaded
+		// images and runs a fresh LoadReservations, which packs into new sheets (SpriteCache.BeginNewSession)
+		// without touching or reloading previously-resident sheets. Unknown image names are ignored so callers
+		// gating by faction/theme need not pre-filter to the exact available set.
+		public void LoadImages(IEnumerable<string> imageNames)
+		{
+			var toResolve = new List<ISpriteSequence>();
+			foreach (var image in imageNames)
+			{
+				if (loadedImages.Contains(image))
+					continue;
+
+				if (!images.TryGetValue(image, out var sequences))
+					continue;
+
+				loadedImages.Add(image);
+				foreach (var sequence in sequences.Values)
+				{
+					sequence.Reserve(modData, TileSet, SpriteCache);
+					toResolve.Add(sequence);
+				}
+			}
+
+			if (toResolve.Count == 0)
+				return;
+
 			SpriteCache.LoadReservations(modData);
+			foreach (var sequence in toResolve)
+				sequence.ResolveSprites(SpriteCache);
+		}
+
+		// Reserve every image's sprites into the cache without resolving the sequences. Lets validation tooling
+		// populate SpriteCache.MissingFiles for all referenced files after a LoadReservations pass. (Resolving
+		// would throw on the first missing file; reservation records them all instead.)
+		public void ReserveAllImages()
+		{
 			foreach (var sequences in images.Values)
-				foreach (var sequence in sequences)
-					sequence.Value.ResolveSprites(SpriteCache);
+				foreach (var sequence in sequences.Values)
+					sequence.Reserve(modData, TileSet, SpriteCache);
 		}
 
 		public void Dispose()

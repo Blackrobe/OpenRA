@@ -48,6 +48,7 @@ namespace OpenRA.Mods.Common.UtilityCommands
 								failed |= ttr.ValidateTileSprites(templatedTerrainInfo, Console.WriteLine);
 
 						var sequences = new SequenceSet(modData.DefaultFileSystem, modData, tileset, null);
+						sequences.ReserveAllImages();
 						sequences.SpriteCache.LoadReservations(modData);
 						foreach (var (filename, location) in sequences.SpriteCache.MissingFiles)
 						{

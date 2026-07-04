@@ -155,6 +155,7 @@ namespace OpenRA.Mods.Common.UtilityCommands
 				r.Sequence = seqName;
 				var seq = seqs[seqName];
 
+				seq.Reserve(modData, tileset, cache);
 				cache.LoadReservations(modData);
 				seq.ResolveSprites(cache);
 
