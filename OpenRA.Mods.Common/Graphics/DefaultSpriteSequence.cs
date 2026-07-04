@@ -407,10 +407,8 @@ namespace OpenRA.Mods.Common.Graphics
 			alpha = LoadField(Alpha, data, defaults);
 			alphaFade = LoadField(AlphaFade, data, defaults, out var alphaFadeLocation);
 
-			var depthSprite = LoadField(DepthSprite, data, defaults, out var depthSpriteLocation);
-			if (!string.IsNullOrEmpty(depthSprite))
-				depthSpriteReservation = cache.ReserveSprites(depthSprite, [LoadField(DepthSpriteFrame, data, defaults)], depthSpriteLocation);
-
+			// Depth-sprite reservation is deferred to Reserve() (see below) so it loads lazily with the owning
+			// image rather than eagerly at parse for every sequence. The offset is a plain value, parsed here.
 			depthSpriteOffset = LoadField(DepthSpriteOffset, data, defaults);
 
 			if (facings < 0)
@@ -450,7 +448,20 @@ namespace OpenRA.Mods.Common.Graphics
 				return;
 
 			reserved = true;
+
+			// Reserve the depth sprite here (not in the ctor) so it loads lazily alongside the owning image. Done in
+			// Reserve() rather than the virtual ReserveSprites so it still runs for subclasses that override
+			// ReserveSprites without calling base (e.g. D2kSpriteSequence), matching the old always-run ctor path.
+			var depthSprite = LoadField(DepthSprite, reserveData, reserveDefaults, out var depthSpriteLocation);
+			if (!string.IsNullOrEmpty(depthSprite))
+				depthSpriteReservation = cache.ReserveSprites(depthSprite, [LoadField(DepthSpriteFrame, reserveData, reserveDefaults)], depthSpriteLocation);
+
 			ReserveSprites(modData, tileset, cache, reserveData, reserveDefaults);
+
+			// Release the retained parse data now reservation is done — it is only needed for the (single) deferred
+			// reservation, and holding the whole sequence's MiniYaml subtree for the object's lifetime is wasteful.
+			reserveData = null;
+			reserveDefaults = null;
 		}
 
 		public virtual void ReserveSprites(ModData modData, string tileset, SpriteCache cache, MiniYaml data, MiniYaml defaults)

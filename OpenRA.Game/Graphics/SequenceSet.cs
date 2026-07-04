@@ -107,6 +107,7 @@ namespace OpenRA.Graphics
 		}
 
 		readonly HashSet<string> loadedImages = [];
+		readonly object loadLock = new();
 
 		public void LoadSprites()
 		{
@@ -118,31 +119,39 @@ namespace OpenRA.Graphics
 		// images and runs a fresh LoadReservations, which packs into new sheets (SpriteCache.BeginNewSession)
 		// without touching or reloading previously-resident sheets. Unknown image names are ignored so callers
 		// gating by faction/theme need not pre-filter to the exact available set.
+		//
+		// Serialized under loadLock: LoadReservations mutates shared SpriteCache state (reservation dictionaries,
+		// the sheet builders, the reservation token counter) and the loadedImages set, none of which is
+		// thread-safe. The gate loads on the main thread today, but the lock lets an on-demand path call in from
+		// elsewhere without corrupting the cache — concurrent callers serialize rather than race.
 		public void LoadImages(IEnumerable<string> imageNames)
 		{
-			var toResolve = new List<ISpriteSequence>();
-			foreach (var image in imageNames)
+			lock (loadLock)
 			{
-				if (loadedImages.Contains(image))
-					continue;
-
-				if (!images.TryGetValue(image, out var sequences))
-					continue;
-
-				loadedImages.Add(image);
-				foreach (var sequence in sequences.Values)
+				var toResolve = new List<ISpriteSequence>();
+				foreach (var image in imageNames)
 				{
-					sequence.Reserve(modData, TileSet, SpriteCache);
-					toResolve.Add(sequence);
+					if (loadedImages.Contains(image))
+						continue;
+
+					if (!images.TryGetValue(image, out var sequences))
+						continue;
+
+					loadedImages.Add(image);
+					foreach (var sequence in sequences.Values)
+					{
+						sequence.Reserve(modData, TileSet, SpriteCache);
+						toResolve.Add(sequence);
+					}
 				}
+
+				if (toResolve.Count == 0)
+					return;
+
+				SpriteCache.LoadReservations(modData);
+				foreach (var sequence in toResolve)
+					sequence.ResolveSprites(SpriteCache);
 			}
-
-			if (toResolve.Count == 0)
-				return;
-
-			SpriteCache.LoadReservations(modData);
-			foreach (var sequence in toResolve)
-				sequence.ResolveSprites(SpriteCache);
 		}
 
 		// Reserve every image's sprites into the cache without resolving the sequences. Lets validation tooling
