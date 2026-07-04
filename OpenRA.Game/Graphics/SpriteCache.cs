@@ -100,7 +100,11 @@ namespace OpenRA.Graphics
 			return GetFrames(fileSystem, filename, loaders);
 		}
 
-		public void LoadReservations(ModData modData)
+		// suppressLoadScreen: skip driving the loading screen (LoadScreen.Display). On-demand loads triggered
+		// mid-game (from GetSequence, potentially inside the render pass) must NOT call Display, which composites
+		// and presents the frame and flips the renderer's frame state — doing that mid-frame corrupts/crashes the
+		// render. Only the eager load-time callers (behind an actual loading screen) should drive it.
+		public void LoadReservations(ModData modData, bool suppressLoadScreen = false)
 		{
 			var pendingResolve = new List<(
 				string Filename,
@@ -218,7 +222,8 @@ namespace OpenRA.Graphics
 
 				// Redraw periodically so the window doesn't go black while Phase A1 runs on background threads.
 				while (!phase1.Wait(2000))
-					modData.LoadScreen?.Display();
+					if (!suppressLoadScreen)
+						modData.LoadScreen?.Display();
 			}
 
 			// Phase A2: serial post-processing — builds pendingResolve from the parallel-decoded frames.
@@ -304,7 +309,8 @@ namespace OpenRA.Graphics
 							return sheetBuilder.Add(frame, premultiplied);
 						});
 
-					modData.LoadScreen?.Display();
+					if (!suppressLoadScreen)
+						modData.LoadScreen?.Display();
 				}
 
 				foreach (var sb in SheetBuilders.Values)

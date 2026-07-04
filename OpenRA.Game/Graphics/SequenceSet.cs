@@ -72,7 +72,20 @@ namespace OpenRA.Graphics
 			if (modData.Manifest.DeferSpriteLoading && !loadedImages.Contains(image) && images.ContainsKey(image))
 			{
 				Log.Write("debug", $"On-demand sprite load: image `{image}` was not preloaded by the sprite gate.");
-				LoadImages(new[] { image });
+
+				// Suppress the loading screen: this can run inside the render pass (e.g. a weapon-effect renderable
+				// resolving its sequence mid-Draw), and LoadScreen.Display presents the frame + flips render state,
+				// which corrupts/crashes mid-frame. Swallow a load failure (e.g. a genuinely missing file) so a gap
+				// degrades to an invisible sprite + logged error rather than a mid-match crash; the image is already
+				// marked loaded so this won't retry every frame.
+				try
+				{
+					LoadImages(new[] { image }, suppressLoadScreen: true);
+				}
+				catch (Exception e)
+				{
+					Log.Write("debug", $"On-demand sprite load failed for image `{image}`: {e.Message}");
+				}
 			}
 
 			if (!images.TryGetValue(image, out var sequences))
@@ -136,7 +149,7 @@ namespace OpenRA.Graphics
 		// the sheet builders, the reservation token counter) and the loadedImages set, none of which is
 		// thread-safe. The gate loads on the main thread today, but the lock lets an on-demand path call in from
 		// elsewhere without corrupting the cache — concurrent callers serialize rather than race.
-		public void LoadImages(IEnumerable<string> imageNames)
+		public void LoadImages(IEnumerable<string> imageNames, bool suppressLoadScreen = false)
 		{
 			lock (loadLock)
 			{
@@ -160,7 +173,7 @@ namespace OpenRA.Graphics
 				if (toResolve.Count == 0)
 					return;
 
-				SpriteCache.LoadReservations(modData);
+				SpriteCache.LoadReservations(modData, suppressLoadScreen);
 				foreach (var sequence in toResolve)
 					sequence.ResolveSprites(SpriteCache);
 			}
