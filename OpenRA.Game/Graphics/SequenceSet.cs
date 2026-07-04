@@ -154,6 +154,32 @@ namespace OpenRA.Graphics
 			}
 		}
 
+		// Load every image defined in the given sequence bundles (manifest sequence-file short-names, e.g. "misc").
+		// Used to eagerly load the shared floor of world-level art before the World is built, when the rest of the
+		// sprite load is deferred to a gate. Re-reads only the named files' top-level keys (cheap); the images
+		// themselves are already parsed, this just selects which subset to load.
+		public void LoadBundles(IEnumerable<string> bundleShortNames)
+		{
+			var eager = new HashSet<string>(bundleShortNames, StringComparer.OrdinalIgnoreCase);
+			if (eager.Count == 0)
+				return;
+
+			var toLoad = new List<string>();
+			foreach (var path in modData.Manifest.Sequences)
+			{
+				var bundle = System.IO.Path.GetFileNameWithoutExtension(path.Contains('|') ? path[(path.IndexOf('|') + 1)..] : path);
+				if (!eager.Contains(bundle))
+					continue;
+
+				using var stream = modData.DefaultFileSystem.Open(path);
+				foreach (var node in MiniYaml.FromStream(stream, path))
+					if (!node.Key.StartsWith(ActorInfo.AbstractActorPrefix) && images.ContainsKey(node.Key))
+						toLoad.Add(node.Key);
+			}
+
+			LoadImages(toLoad);
+		}
+
 		// Reserve every image's sprites into the cache without resolving the sequences. Lets validation tooling
 		// populate SpriteCache.MissingFiles for all referenced files after a LoadReservations pass. (Resolving
 		// would throw on the first missing file; reservation records them all instead.)

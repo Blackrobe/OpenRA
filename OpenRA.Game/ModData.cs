@@ -186,11 +186,14 @@ namespace OpenRA
 			using (new Support.PerfTimer("PrepareMap.InitializeLoaders"))
 				InitializeLoaders(map);
 
-			// With deferred (lazy) sprite loading the eager full load is skipped here; the World actor's
-			// ISpriteLoadGate trait loads the needed subset after the World is built (see Game.StartGame). A mod
-			// without that trait falls back to the full load there, so nothing renders blank.
+			// With deferred (lazy) sprite loading, load only the eager floor bundles here (world-level art that
+			// World-actor traits resolve during the upcoming World ctor — shroud, smudges, decorations); the World
+			// actor's ISpriteLoadGate trait loads the per-faction subset after the World is built (see
+			// Game.StartGame). Non-deferred mods load everything, as before.
 			using (new Support.PerfTimer("PrepareMap.LoadSprites"))
-				if (!Manifest.DeferSpriteLoading)
+				if (Manifest.DeferSpriteLoading)
+					map.Sequences.LoadBundles(Manifest.EagerSpriteBundles);
+				else
 					map.Sequences.LoadSprites();
 
 			// Load music with map assets mounted

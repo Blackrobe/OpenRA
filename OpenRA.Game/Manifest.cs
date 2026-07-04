@@ -78,6 +78,12 @@ namespace OpenRA
 		// Mods that don't set this keep the original eager behaviour.
 		public readonly bool DeferSpriteLoading;
 
+		// Sequence bundles (sequence-file short-names) loaded eagerly at map prepare even when DeferSpriteLoading
+		// is set — the shared "floor" of world-level art (shroud, smudges, decorations, effects) that World-actor
+		// traits resolve in their constructors, i.e. before the deferred gate runs. Must cover every image any
+		// World-actor render trait resolves at construction, or those sequences throw during World setup.
+		public readonly ImmutableArray<string> EagerSpriteBundles = [];
+
 		// TODO: This should be controlled by a user-selected translation bundle!
 		public readonly string FluentCulture = "en";
 		public readonly bool AllowUnusedFluentMessagesInExternalPackages = true;
@@ -89,7 +95,7 @@ namespace OpenRA
 			"Voices", "Notifications", "Music", "Playlists", "FluentMessages", "TileSets", "ChromeMetrics", "Missions", "Hotkeys",
 			"ServerTraits", "LoadScreen", "DefaultOrderGenerator", "SupportsMapsFrom", "SoundFormats", "SpriteFormats", "VideoFormats",
 			"SpriteSequenceFormat", "TerrainFormat", "RequiresMods", "PackageFormats", "AllowUnusedFluentMessagesInExternalPackages", "RendererConstants",
-			"DeferSpriteLoading"
+			"DeferSpriteLoading", "EagerSpriteBundles"
 		}.ToFrozenSet();
 
 		public readonly FrozenDictionary<string, MiniYaml> GlobalModData;
@@ -183,6 +189,9 @@ namespace OpenRA
 
 			if (yaml.TryGetValue("DeferSpriteLoading", out entry))
 				DeferSpriteLoading = FieldLoader.GetValue<bool>("DeferSpriteLoading", entry.Value);
+
+			if (yaml.TryGetValue("EagerSpriteBundles", out entry))
+				EagerSpriteBundles = FieldLoader.GetValue<ImmutableArray<string>>("EagerSpriteBundles", entry.Value);
 
 			if (yaml.TryGetValue("AllowUnusedFluentMessagesInExternalPackages", out entry))
 				AllowUnusedFluentMessagesInExternalPackages =
