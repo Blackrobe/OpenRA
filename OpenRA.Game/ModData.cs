@@ -186,8 +186,12 @@ namespace OpenRA
 			using (new Support.PerfTimer("PrepareMap.InitializeLoaders"))
 				InitializeLoaders(map);
 
+			// With deferred (lazy) sprite loading the eager full load is skipped here; the World actor's
+			// ISpriteLoadGate trait loads the needed subset after the World is built (see Game.StartGame). A mod
+			// without that trait falls back to the full load there, so nothing renders blank.
 			using (new Support.PerfTimer("PrepareMap.LoadSprites"))
-				map.Sequences.LoadSprites();
+				if (!Manifest.DeferSpriteLoading)
+					map.Sequences.LoadSprites();
 
 			// Load music with map assets mounted
 			using (new Support.PerfTimer("Map.Music"))

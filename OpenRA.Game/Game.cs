@@ -25,6 +25,7 @@ using OpenRA.Network;
 using OpenRA.Primitives;
 using OpenRA.Server;
 using OpenRA.Support;
+using OpenRA.Traits;
 using OpenRA.Widgets;
 
 namespace OpenRA
@@ -281,6 +282,24 @@ namespace OpenRA
 
 				using (new PerfTimer("NewWorld.WorldCtor"))
 					OrderManager.World = new World(map, ModData, OrderManager, type);
+
+				// Lazy sprite loading: the eager full load was skipped at PrepareMap. Now the World actor exists
+				// (so lobby factions — including resolved Random — and preplaced map actors are known), let its
+				// gate trait load only the sprite art the match needs. Sprite construction so far is pixel-free;
+				// nothing has been resolved/rendered yet (WorldRenderer + LoadComplete follow below). If the mod
+				// opted into deferral but ships no gate trait, fall back to the full load so nothing renders blank.
+				if (ModData.Manifest.DeferSpriteLoading)
+				{
+					using (new PerfTimer("NewWorld.LoadGatedSprites"))
+					{
+						var gates = OrderManager.World.WorldActor.TraitsImplementing<ISpriteLoadGate>().ToArray();
+						if (gates.Length == 0)
+							map.Sequences.LoadSprites();
+						else
+							foreach (var gate in gates)
+								gate.LoadGatedSprites(OrderManager.World);
+					}
+				}
 			}
 
 			OrderManager.World.GameOver += FinishBenchmark;

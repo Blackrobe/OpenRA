@@ -73,6 +73,11 @@ namespace OpenRA
 		public readonly string SpriteSequenceFormat;
 		public readonly string TerrainFormat;
 
+		// When true, the engine skips the eager full sprite load at map prepare and instead invokes the World
+		// actor's ISpriteLoadGate trait after the World is built, so only the art the match needs is loaded.
+		// Mods that don't set this keep the original eager behaviour.
+		public readonly bool DeferSpriteLoading;
+
 		// TODO: This should be controlled by a user-selected translation bundle!
 		public readonly string FluentCulture = "en";
 		public readonly bool AllowUnusedFluentMessagesInExternalPackages = true;
@@ -83,7 +88,8 @@ namespace OpenRA
 			"Sequences", "ModelSequences", "Cursors", "Chrome", "Assemblies", "ChromeLayout", "Weapons",
 			"Voices", "Notifications", "Music", "Playlists", "FluentMessages", "TileSets", "ChromeMetrics", "Missions", "Hotkeys",
 			"ServerTraits", "LoadScreen", "DefaultOrderGenerator", "SupportsMapsFrom", "SoundFormats", "SpriteFormats", "VideoFormats",
-			"SpriteSequenceFormat", "TerrainFormat", "RequiresMods", "PackageFormats", "AllowUnusedFluentMessagesInExternalPackages", "RendererConstants"
+			"SpriteSequenceFormat", "TerrainFormat", "RequiresMods", "PackageFormats", "AllowUnusedFluentMessagesInExternalPackages", "RendererConstants",
+			"DeferSpriteLoading"
 		}.ToFrozenSet();
 
 		public readonly FrozenDictionary<string, MiniYaml> GlobalModData;
@@ -174,6 +180,9 @@ namespace OpenRA
 
 			if (yaml.TryGetValue("TerrainFormat", out entry))
 				TerrainFormat = entry.Value;
+
+			if (yaml.TryGetValue("DeferSpriteLoading", out entry))
+				DeferSpriteLoading = FieldLoader.GetValue<bool>("DeferSpriteLoading", entry.Value);
 
 			if (yaml.TryGetValue("AllowUnusedFluentMessagesInExternalPackages", out entry))
 				AllowUnusedFluentMessagesInExternalPackages =

@@ -373,6 +373,11 @@ namespace OpenRA.Traits
 	[RequireExplicitImplementation]
 	public interface INotifySelection { void SelectionChanged(); }
 
+	// Implemented by a World-actor trait that drives lazy sprite loading. When the manifest sets
+	// DeferSpriteLoading, the engine skips the eager full sprite load at PrepareMap and instead invokes this once,
+	// right after the World actor is constructed (so lobby factions — including Random — and preplaced map actors
+	// are known), to load only the subset of sprite art the match actually needs.
+	public interface ISpriteLoadGate { void LoadGatedSprites(World world); }
 	public interface IWorldLoaded { void WorldLoaded(World w, WorldRenderer wr); }
 	public interface IPostWorldLoaded { void PostWorldLoaded(World w, WorldRenderer wr); }
 	public interface INotifyGameLoading { void GameLoading(World w); }
