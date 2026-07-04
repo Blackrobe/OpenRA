@@ -63,6 +63,18 @@ namespace OpenRA.Graphics
 
 		public ISpriteSequence GetSequence(string image, string sequence)
 		{
+			// On-demand tail (deferred loading only): if this image wasn't preloaded by the gate — an actor acquired
+			// mid-match from another faction (capture / mind-control / crate / tech) or a floor gap — load it now so
+			// it renders instead of throwing on the unresolved sprite. Idempotent and cheap once loaded (LoadImages
+			// skips already-loaded images); the first use pays a one-time decode+upload hitch. Logged so gate/floor
+			// gaps surface during testing rather than hiding. This is the safety net that lets the gate be
+			// approximately complete rather than perfectly complete.
+			if (modData.Manifest.DeferSpriteLoading && !loadedImages.Contains(image) && images.ContainsKey(image))
+			{
+				Log.Write("debug", $"On-demand sprite load: image `{image}` was not preloaded by the sprite gate.");
+				LoadImages(new[] { image });
+			}
+
 			if (!images.TryGetValue(image, out var sequences))
 				throw new InvalidOperationException($"Image `{image}` does not have any sequences defined.");
 
