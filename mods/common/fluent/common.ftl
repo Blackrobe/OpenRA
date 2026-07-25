@@ -464,6 +464,7 @@ dialog-overwrite-save =
     .confirm = Overwrite
 
 ## MainMenuLogic
+label-loading-maps = Loading maps...
 label-loading-news = Loading news
 label-news-retrieval-failed = Failed to retrieve news: { $message }
 label-news-parsing-failed = Failed to parse news: { $message }

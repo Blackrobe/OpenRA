@@ -16,6 +16,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using OpenRA.FileSystem;
 using OpenRA.GameRules;
+using OpenRA.Support;
 using OpenRA.Traits;
 
 namespace OpenRA
@@ -109,23 +110,30 @@ namespace OpenRA
 			if (additional == null && defaults != null)
 				return defaults;
 
-			IEnumerable<MiniYamlNode> yamlNodes = MiniYaml.Load(fileSystem, files, additional);
+			List<MiniYamlNode> yamlNodes;
+			using (new PerfTimer("Ruleset.LoadYaml<" + name + ">"))
+				yamlNodes = MiniYaml.Load(fileSystem, files, additional);
 
 			// Optionally, the caller can filter out elements from the loaded set of nodes. Default behavior is unfiltered.
+			IEnumerable<MiniYamlNode> filteredNodes = yamlNodes;
 			if (filterNode != null)
-				yamlNodes = yamlNodes.Where(k => !filterNode(k));
+				filteredNodes = yamlNodes.Where(k => !filterNode(k));
 
-			return yamlNodes.ToDictionaryWithConflictLog(k => k.Key.ToLowerInvariant(), makeObject, "LoadFromManifest<" + name + ">");
+			using (new PerfTimer("Ruleset.Construct<" + name + ">"))
+				return filteredNodes.ToDictionaryWithConflictLog(
+					k => k.Key.ToLowerInvariant(), makeObject, "LoadFromManifest<" + name + ">");
 		}
 
 		public static Ruleset LoadDefaults(ModData modData)
 		{
+			using var timer = new PerfTimer("Ruleset.LoadDefaults");
 			var m = modData.Manifest;
 			var fs = modData.DefaultFileSystem;
 
 			Ruleset ruleset = null;
 			void LoadRuleset()
 			{
+				using var workerTimer = new PerfTimer("Ruleset.LoadDefaults.Worker");
 				var actors = MergeOrDefault("Manifest,Rules", fs, m.Rules, null, null,
 					k => new ActorInfo(modData.ObjectCreator, k.Key.ToLowerInvariant(), k.Value),
 					filterNode: n => n.Key.StartsWith(ActorInfo.AbstractActorPrefix));
@@ -181,12 +189,16 @@ namespace OpenRA
 			MiniYaml mapRules, MiniYaml mapWeapons, MiniYaml mapVoices, MiniYaml mapNotifications,
 			MiniYaml mapMusic, MiniYaml mapModelSequences)
 		{
+			using var timer = new PerfTimer("Ruleset.Load");
 			var m = modData.Manifest;
-			var dr = modData.DefaultRules;
+			Ruleset dr;
+			using (new PerfTimer("Ruleset.Load.DefaultRules"))
+				dr = modData.DefaultRules;
 
 			Ruleset ruleset = null;
 			void LoadRuleset()
 			{
+				using var workerTimer = new PerfTimer("Ruleset.Load.Worker");
 				var actors = MergeOrDefault("Rules", fileSystem, m.Rules, mapRules, dr.Actors,
 					k => new ActorInfo(modData.ObjectCreator, k.Key.ToLowerInvariant(), k.Value),
 					filterNode: n => n.Key.StartsWith(ActorInfo.AbstractActorPrefix));
@@ -208,7 +220,9 @@ namespace OpenRA
 					k => new PlaylistDefinition(k.Key, k.Value));
 
 				// TODO: Add support for merging custom terrain modifications
-				var terrainInfo = modData.DefaultTerrainInfo[tileSet];
+				ITerrainInfo terrainInfo;
+				using (new PerfTimer("Ruleset.Load.Terrain"))
+					terrainInfo = modData.DefaultTerrainInfo[tileSet];
 
 				var modelSequences = dr.ModelSequences;
 				if (mapModelSequences != null)

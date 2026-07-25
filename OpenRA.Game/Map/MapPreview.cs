@@ -349,7 +349,13 @@ namespace OpenRA
 		public void UpdateFromMapWithoutOwningPackage(IReadOnlyPackage p, IReadOnlyPackage parent, MapClassification classification,
 			MapGridType? gridType = null, MiniYamlNode[][] modDataRules = null)
 		{
-			UpdateFromMap(p, classification, gridType, modDataRules);
+			UpdateFromMapWithoutOwningPackage(p, parent, classification, gridType, modDataRules, null);
+		}
+
+		internal void UpdateFromMapWithoutOwningPackage(IReadOnlyPackage p, IReadOnlyPackage parent, MapClassification classification,
+			MapGridType? gridType, MiniYamlNode[][] modDataRules, MapCacheLoadMetrics metrics, HashSet<string> stringPool = null)
+		{
+			UpdateFromMap(p, classification, gridType, modDataRules, metrics, stringPool);
 			parentPackage = parent;
 			package = null;
 		}
@@ -361,99 +367,117 @@ namespace OpenRA
 		public void UpdateFromMap(IReadOnlyPackage p, MapClassification classification,
 			MapGridType? gridType = null, MiniYamlNode[][] modDataRules = null)
 		{
+			UpdateFromMap(p, classification, gridType, modDataRules, null, null);
+		}
+
+		void UpdateFromMap(IReadOnlyPackage p, MapClassification classification,
+			MapGridType? gridType, MiniYamlNode[][] modDataRules, MapCacheLoadMetrics metrics, HashSet<string> stringPool)
+		{
 			Path = p.Name;
 			package = p;
 
 			Dictionary<string, MiniYaml> yaml;
-			using (var yamlStream = p.GetStream("map.yaml"))
-			{
-				if (yamlStream == null)
-					throw new FileNotFoundException("Required file map.yaml not present in this map");
+			using (metrics?.Measure(MapCacheLoadPhase.MapYaml))
+				using (var yamlStream = p.GetStream("map.yaml"))
+				{
+					if (yamlStream == null)
+						throw new FileNotFoundException("Required file map.yaml not present in this map");
 
-				yaml = new MiniYaml(null, MiniYaml.FromStream(yamlStream, $"{p.Name}:map.yaml", stringPool: cache.StringPool)).ToDictionary();
-			}
+					yaml = new MiniYaml(null, MiniYaml.FromStream(
+						yamlStream, $"{p.Name}:map.yaml", stringPool: stringPool ?? cache.StringPool)).ToDictionary();
+				}
 
 			var newData = innerData.Clone();
-			newData.Class = classification;
-			newData.GridType = gridType ?? modData.GetOrCreate<MapGrid>().Type;
-
-			if (yaml.TryGetValue("MapFormat", out var temp))
+			using (metrics?.Measure(MapCacheLoadPhase.PreviewMetadata))
 			{
-				var format = FieldLoader.GetValue<int>("MapFormat", temp.Value);
-				if (format < Map.SupportedMapFormat)
-					throw new InvalidDataException($"Map format {format} is not supported.");
-			}
+				newData.Class = classification;
+				newData.GridType = gridType ?? modData.GetOrCreate<MapGrid>().Type;
 
-			if (yaml.TryGetValue("Title", out temp))
-				newData.Title = temp.Value;
-
-			if (yaml.TryGetValue("Categories", out temp))
-				newData.Categories = FieldLoader.GetValue<ImmutableArray<string>>("Categories", temp.Value);
-
-			if (yaml.TryGetValue("Tileset", out temp))
-				newData.TileSet = temp.Value;
-
-			if (yaml.TryGetValue("Author", out temp))
-				newData.Author = temp.Value;
-
-			if (yaml.TryGetValue("Bounds", out temp))
-				newData.Bounds = FieldLoader.GetValue<Rectangle>("Bounds", temp.Value);
-
-			if (yaml.TryGetValue("Visibility", out temp))
-				newData.Visibility = FieldLoader.GetValue<MapVisibility>("Visibility", temp.Value);
-
-			var requiresMod = string.Empty;
-			if (yaml.TryGetValue("RequiresMod", out temp))
-				requiresMod = temp.Value;
-
-			if (yaml.TryGetValue("MapFormat", out temp))
-				newData.MapFormat = FieldLoader.GetValue<int>("MapFormat", temp.Value);
-
-			newData.Status = modData.Manifest.MapCompatibility.Contains(requiresMod) ?
-				MapStatus.Available : MapStatus.Unavailable;
-
-			try
-			{
-				// Actor definitions may change if the map format changes
-				if (yaml.TryGetValue("Actors", out var actorDefinitions))
+				if (yaml.TryGetValue("MapFormat", out var temp))
 				{
-					var spawns = new List<CPos>();
-					foreach (var kv in actorDefinitions.Nodes.Where(d => d.Value.Value == "mpspawn"))
+					var format = FieldLoader.GetValue<int>("MapFormat", temp.Value);
+					if (format < Map.SupportedMapFormat)
+						throw new InvalidDataException($"Map format {format} is not supported.");
+				}
+
+				if (yaml.TryGetValue("Title", out temp))
+					newData.Title = temp.Value;
+
+				if (yaml.TryGetValue("Categories", out temp))
+					newData.Categories = FieldLoader.GetValue<ImmutableArray<string>>("Categories", temp.Value);
+
+				if (yaml.TryGetValue("Tileset", out temp))
+					newData.TileSet = temp.Value;
+
+				if (yaml.TryGetValue("Author", out temp))
+					newData.Author = temp.Value;
+
+				if (yaml.TryGetValue("Bounds", out temp))
+					newData.Bounds = FieldLoader.GetValue<Rectangle>("Bounds", temp.Value);
+
+				if (yaml.TryGetValue("Visibility", out temp))
+					newData.Visibility = FieldLoader.GetValue<MapVisibility>("Visibility", temp.Value);
+
+				var requiresMod = string.Empty;
+				if (yaml.TryGetValue("RequiresMod", out temp))
+					requiresMod = temp.Value;
+
+				if (yaml.TryGetValue("MapFormat", out temp))
+					newData.MapFormat = FieldLoader.GetValue<int>("MapFormat", temp.Value);
+
+				newData.Status = modData.Manifest.MapCompatibility.Contains(requiresMod) ?
+					MapStatus.Available : MapStatus.Unavailable;
+
+				try
+				{
+					// Actor definitions may change if the map format changes
+					if (yaml.TryGetValue("Actors", out var actorDefinitions))
 					{
-						var s = new ActorReference(kv.Value.Value, kv.Value);
-						spawns.Add(s.Get<LocationInit>().Value);
+						var spawns = new List<CPos>();
+						foreach (var kv in actorDefinitions.Nodes.Where(d => d.Value.Value == "mpspawn"))
+						{
+							var s = new ActorReference(kv.Value.Value, kv.Value);
+							spawns.Add(s.Get<LocationInit>().Value);
+						}
+
+						newData.SpawnPoints = spawns.ToImmutableArray();
 					}
-
-					newData.SpawnPoints = spawns.ToImmutableArray();
+					else
+						newData.SpawnPoints = [];
 				}
-				else
-					newData.SpawnPoints = [];
-			}
-			catch (Exception)
-			{
-				newData.SpawnPoints = [];
-				newData.Status = MapStatus.Unavailable;
-			}
-
-			try
-			{
-				// Player definitions may change if the map format changes
-				if (yaml.TryGetValue("Players", out var playerDefinitions))
+				catch (Exception)
 				{
-					newData.Players = new MapPlayers(playerDefinitions.Nodes);
-					newData.PlayerCount = newData.Players.Players.Count(x => x.Value.Playable);
+					newData.SpawnPoints = [];
+					newData.Status = MapStatus.Unavailable;
+				}
+
+				try
+				{
+					// Player definitions may change if the map format changes
+					if (yaml.TryGetValue("Players", out var playerDefinitions))
+					{
+						newData.Players = new MapPlayers(playerDefinitions.Nodes);
+						newData.PlayerCount = newData.Players.Players.Count(x => x.Value.Playable);
+					}
+				}
+				catch (Exception)
+				{
+					newData.Status = MapStatus.Unavailable;
 				}
 			}
-			catch (Exception)
-			{
-				newData.Status = MapStatus.Unavailable;
-			}
 
-			newData.SetCustomRules(modData, this, yaml, modDataRules);
+			using (metrics?.Measure(MapCacheLoadPhase.PreviewRules))
+				newData.SetCustomRules(modData, this, yaml, modDataRules);
+			if (newData.RuleDefinitions != null)
+				metrics?.AddCustomRulesMap();
 
 			if (cache.LoadPreviewImages && p.Contains("map.png"))
-				using (var dataStream = p.GetStream("map.png"))
-					newData.Preview = new Png(dataStream);
+			{
+				using (metrics?.Measure(MapCacheLoadPhase.PreviewPng))
+					using (var dataStream = p.GetStream("map.png"))
+						newData.Preview = new Png(dataStream);
+				metrics?.AddPreviewPng();
+			}
 
 			newData.ModifiedDate = p.Name != null ? File.GetLastWriteTime(p.Name) : DateTime.Now;
 
@@ -462,6 +486,17 @@ namespace OpenRA
 			// so should always replace their metadata
 			lock (syncRoot)
 				innerData = newData;
+		}
+
+		internal void UpdateFromBackground(MapPreview source)
+		{
+			lock (syncRoot)
+			{
+				Path = source.Path;
+				parentPackage = source.parentPackage;
+				package = null;
+				innerData = source.innerData;
+			}
 		}
 
 		public void UpdateFromGenerationArgs(MapGenerationArgs args)

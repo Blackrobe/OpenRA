@@ -192,9 +192,10 @@ namespace OpenRA.FileSystem
 
 		Stream GetFromCache(string filename)
 		{
-			var package = fileIndex[filename]
-				.LastOrDefault(x => x.Contains(filename));
+			if (!fileIndex.TryGetValue(filename, out var packages))
+				return null;
 
+			var package = packages.LastOrDefault(x => x.Contains(filename));
 			return package?.GetStream(filename);
 		}
 
@@ -215,7 +216,9 @@ namespace OpenRA.FileSystem
 				return true;
 			}
 
-			package = fileIndex[path].LastOrDefault(x => x.Contains(path));
+			package = fileIndex.TryGetValue(path, out var packages)
+				? packages.LastOrDefault(x => x.Contains(path))
+				: null;
 			filename = path;
 
 			return package != null;

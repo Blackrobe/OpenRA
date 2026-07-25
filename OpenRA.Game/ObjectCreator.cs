@@ -26,6 +26,7 @@ namespace OpenRA
 
 		readonly Cache<string, Type> typeCache;
 		readonly Cache<Type, ConstructorInfo> ctorCache;
+		readonly object cacheSync = new();
 		readonly (Assembly Assembly, string Namespace)[] assemblies;
 
 		public ObjectCreator(Manifest manifest, InstalledMods mods)
@@ -82,7 +83,10 @@ namespace OpenRA
 
 		public T CreateObject<T>(string className, Dictionary<string, object> args)
 		{
-			var type = typeCache[className];
+			Type type;
+			lock (cacheSync)
+				type = typeCache[className];
+
 			if (type == null)
 			{
 				// HACK: The linter does not want to crash but only print an error instead
@@ -94,7 +98,10 @@ namespace OpenRA
 				return default;
 			}
 
-			var ctor = ctorCache[type];
+			ConstructorInfo ctor;
+			lock (cacheSync)
+				ctor = ctorCache[type];
+
 			if (ctor == null)
 				return (T)CreateBasic(type);
 			else

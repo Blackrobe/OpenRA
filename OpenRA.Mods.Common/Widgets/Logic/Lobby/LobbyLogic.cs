@@ -208,6 +208,7 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 					"onMapUpdate", (Action<string>)(uid =>
 					{
 						orderManager.IssueOrder(Order.Command("map " + uid));
+						modData.MapCache.RememberLobbyMap(uid);
 						Game.Settings.Server.Map = uid;
 						Game.Settings.Save();
 					})
@@ -240,11 +241,21 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 			var mapButton = lobby.GetOrNull<ButtonWidget>("CHANGEMAP_BUTTON");
 			if (mapButton != null)
 			{
+				var mapButtonText = mapButton.GetText;
+				mapButton.GetText = () => modData.MapCache.IsMapScanComplete
+					? mapButtonText()
+					: FluentProvider.GetMessage("label-loading-maps");
 				mapButton.IsVisible = () => panel != PanelType.Servers;
-				mapButton.IsDisabled = () => gameStarting || panel == PanelType.Kick || panel == PanelType.ForceStart ||
+				mapButton.IsDisabled = () => !modData.MapCache.IsMapScanComplete ||
+					gameStarting || panel == PanelType.Kick || panel == PanelType.ForceStart ||
 					orderManager.LocalClient == null || orderManager.LocalClient.IsReady;
 				mapButton.OnClick = () =>
 				{
+					// IsDisabled should prevent this, but do not allow keyboard or scripted activation
+					// to snapshot a partial map cache.
+					if (!modData.MapCache.IsMapScanComplete)
+						return;
+
 					var onSelect = new Action<string>(uid =>
 					{
 						// Don't select the same map again, and handle map becoming unavailable
@@ -253,6 +264,7 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 							return;
 
 						orderManager.IssueOrder(Order.Command("map " + uid));
+						modData.MapCache.RememberLobbyMap(uid);
 						Game.Settings.Server.Map = uid;
 						Game.Settings.Save();
 					});
@@ -273,11 +285,19 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 					modData.MapCache.UpdateMaps();
 
 					var enableMapGenerator = Game.IsHost && orderManager.LobbyInfo.GlobalSettings.EnableMapGeneration;
+					var remoteMapPool = skirmishMode ? null : orderManager.ServerMapPool;
+					var availableLobbyMaps = modData.MapCache
+						.Where(p => p.Status == MapStatus.Available && p.Visibility.HasFlag(MapVisibility.Lobby))
+						.ToArray();
+					Log.Write("debug",
+						$"Opening map chooser with {availableLobbyMaps.Count(p => p.Class == MapClassification.System)} system and " +
+						$"{availableLobbyMaps.Count(p => p.Class == MapClassification.User)} user maps; " +
+						$"remote pool={(remoteMapPool == null ? "none" : remoteMapPool.Count)}.");
 					Ui.OpenWindow("MAPCHOOSER_PANEL", new WidgetArgs()
 					{
 						{ "initialMap", modData.MapCache.PickLastModifiedMap(MapVisibility.Lobby) ?? map.Uid },
 						{ "initialGeneratedMap", lastGeneratedMap },
-						{ "remoteMapPool", orderManager.ServerMapPool },
+						{ "remoteMapPool", remoteMapPool },
 						{ "initialTab", MapClassification.System },
 						{ "onExit", modData.MapCache.UpdateMaps },
 						{ "onSelect", Game.IsHost ? onSelect : null },

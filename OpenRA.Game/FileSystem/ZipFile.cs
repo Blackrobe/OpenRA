@@ -25,6 +25,7 @@ namespace OpenRA.FileSystem
 		{
 			public string Name { get; protected set; }
 			protected ZipFile pkg;
+			protected readonly object pkgSync = new();
 
 			// Dummy constructor for use with ReadWriteZipFile
 			protected ReadOnlyZipFile() { }
@@ -37,16 +38,19 @@ namespace OpenRA.FileSystem
 
 			public Stream GetStream(string filename)
 			{
-				var entry = pkg.GetEntry(filename);
-				if (entry == null)
-					return null;
-
-				using (var z = pkg.GetInputStream(entry))
+				lock (pkgSync)
 				{
-					var ms = new MemoryStream((int)entry.Size);
-					z.CopyTo(ms);
-					ms.Seek(0, SeekOrigin.Begin);
-					return ms;
+					var entry = pkg.GetEntry(filename);
+					if (entry == null)
+						return null;
+
+					using (var z = pkg.GetInputStream(entry))
+					{
+						var ms = new MemoryStream((int)entry.Size);
+						z.CopyTo(ms);
+						ms.Seek(0, SeekOrigin.Begin);
+						return ms;
+					}
 				}
 			}
 
@@ -54,31 +58,41 @@ namespace OpenRA.FileSystem
 			{
 				get
 				{
-					foreach (ZipEntry entry in pkg)
-						if (entry.IsFile)
-							yield return entry.Name;
+					lock (pkgSync)
+						return pkg.Cast<ZipEntry>()
+							.Where(entry => entry.IsFile)
+							.Select(entry => entry.Name)
+							.ToArray();
 				}
 			}
 
 			public bool Contains(string filename)
 			{
-				return pkg.GetEntry(filename) != null;
+				lock (pkgSync)
+					return pkg.GetEntry(filename) != null;
 			}
 
 			public void Dispose()
 			{
-				pkg?.Close();
+				lock (pkgSync)
+					pkg?.Close();
 				GC.SuppressFinalize(this);
 			}
 
 			public IReadOnlyPackage OpenPackage(string filename, FileSystem context)
 			{
 				// Directories are stored with a trailing "/" in the index
-				var entry = pkg.GetEntry(filename) ?? pkg.GetEntry(filename + "/");
-				if (entry == null)
-					return null;
+				bool isDirectory;
+				lock (pkgSync)
+				{
+					var entry = pkg.GetEntry(filename) ?? pkg.GetEntry(filename + "/");
+					if (entry == null)
+						return null;
 
-				if (entry.IsDirectory)
+					isDirectory = entry.IsDirectory;
+				}
+
+				if (isDirectory)
 					return new ZipFolder(this, filename);
 
 				// Other package types can be loaded normally
@@ -145,18 +159,24 @@ namespace OpenRA.FileSystem
 
 			public void Update(string filename, byte[] contents)
 			{
-				pkg.BeginUpdate();
-				pkg.Add(new StaticStreamDataSource(new MemoryStream(contents)), filename);
-				pkg.CommitUpdate();
-				Commit();
+				lock (pkgSync)
+				{
+					pkg.BeginUpdate();
+					pkg.Add(new StaticStreamDataSource(new MemoryStream(contents)), filename);
+					pkg.CommitUpdate();
+					Commit();
+				}
 			}
 
 			public void Delete(string filename)
 			{
-				pkg.BeginUpdate();
-				pkg.Delete(filename);
-				pkg.CommitUpdate();
-				Commit();
+				lock (pkgSync)
+				{
+					pkg.BeginUpdate();
+					pkg.Delete(filename);
+					pkg.CommitUpdate();
+					Commit();
+				}
 			}
 
 			public static ReadWriteZipFile FromBase64String(string data)
@@ -166,10 +186,15 @@ namespace OpenRA.FileSystem
 
 			public string ToBase64String()
 			{
-				return Convert.ToBase64String(pkgStream.ToArray());
+				lock (pkgSync)
+					return Convert.ToBase64String(pkgStream.ToArray());
 			}
 
-			public byte[] GetBytes() => pkgStream.ToArray();
+			public byte[] GetBytes()
+			{
+				lock (pkgSync)
+					return pkgStream.ToArray();
+			}
 		}
 
 		sealed class ZipFolder : IReadOnlyPackage

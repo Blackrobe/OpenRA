@@ -57,7 +57,7 @@ namespace OpenRA
 			Rules, ServerTraits,
 			Sequences, ModelSequences, Cursors, Chrome, ChromeLayout,
 			Weapons, Voices, Notifications, Music, Playlists, FluentMessages, TileSets,
-			ChromeMetrics, MapCompatibility, Missions, Hotkeys;
+			ChromeMetrics, MapCompatibility, Missions, Shellmaps, Hotkeys;
 
 		public readonly FrozenDictionary<string, string> MapFolders;
 		public readonly MiniYaml FileSystem;
@@ -83,7 +83,8 @@ namespace OpenRA
 			"Sequences", "ModelSequences", "Cursors", "Chrome", "Assemblies", "ChromeLayout", "Weapons",
 			"Voices", "Notifications", "Music", "Playlists", "FluentMessages", "TileSets", "ChromeMetrics", "Missions", "Hotkeys",
 			"ServerTraits", "LoadScreen", "DefaultOrderGenerator", "SupportsMapsFrom", "SoundFormats", "SpriteFormats", "VideoFormats",
-			"SpriteSequenceFormat", "TerrainFormat", "RequiresMods", "PackageFormats", "AllowUnusedFluentMessagesInExternalPackages", "RendererConstants"
+			"SpriteSequenceFormat", "TerrainFormat", "RequiresMods", "PackageFormats", "AllowUnusedFluentMessagesInExternalPackages",
+			"RendererConstants", "Shellmaps"
 		}.ToFrozenSet();
 
 		public readonly FrozenDictionary<string, MiniYaml> GlobalModData;
@@ -136,6 +137,7 @@ namespace OpenRA
 			TileSets = YamlList(yaml, "TileSets");
 			ChromeMetrics = YamlList(yaml, "ChromeMetrics");
 			Missions = YamlList(yaml, "Missions");
+			Shellmaps = YamlList(yaml, "Shellmaps");
 			Hotkeys = YamlList(yaml, "Hotkeys");
 
 			ServerTraits = YamlList(yaml, "ServerTraits");

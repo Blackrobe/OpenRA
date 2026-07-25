@@ -112,18 +112,21 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 			missionsButton.OnClick = () => OpenMissionBrowserPanel(modData.MapCache.PickLastModifiedMap(MapVisibility.MissionSelector));
 
 			var hasCampaign = modData.Manifest.Missions.Length > 0;
-			var hasMissions = modData.MapCache
-				.Any(p => p.Status == MapStatus.Available && p.Visibility.HasFlag(MapVisibility.MissionSelector));
+			missionsButton.IsDisabled = () => !modData.MapCache.IsMapScanComplete ||
+				(!hasCampaign && !modData.MapCache
+					.Any(p => p.Status == MapStatus.Available && p.Visibility.HasFlag(MapVisibility.MissionSelector)));
 
-			missionsButton.Disabled = !hasCampaign && !hasMissions;
-
-			var hasMaps = modData.MapCache.Any(p => p.Visibility.HasFlag(MapVisibility.Lobby));
 			var skirmishButton = singleplayerMenu.Get<ButtonWidget>("SKIRMISH_BUTTON");
+			var skirmishButtonText = skirmishButton.GetText;
+			skirmishButton.GetText = () => modData.MapCache.HasAvailableLobbyMap
+				? skirmishButtonText()
+				: FluentProvider.GetMessage("label-loading-maps");
 			skirmishButton.OnClick = StartSkirmishGame;
-			skirmishButton.Disabled = !hasMaps;
+			skirmishButton.IsDisabled = () => !modData.MapCache.HasAvailableLobbyMap;
 
 			var loadButton = singleplayerMenu.Get<ButtonWidget>("LOAD_BUTTON");
-			loadButton.IsDisabled = () => !LoadGameBrowserLogic.IsLoadPanelEnabled(modData.Manifest);
+			loadButton.IsDisabled = () => !modData.MapCache.IsMapScanComplete ||
+				!LoadGameBrowserLogic.IsLoadPanelEnabled(modData.Manifest);
 			loadButton.OnClick = OpenGameSaveBrowserPanel;
 
 			var encyclopediaButton = singleplayerMenu.GetOrNull<ButtonWidget>("ENCYCLOPEDIA_BUTTON");
@@ -136,7 +139,9 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 			var extrasMenu = widget.Get("EXTRAS_MENU");
 			extrasMenu.IsVisible = () => menuType == MenuType.Extras;
 
-			extrasMenu.Get<ButtonWidget>("REPLAYS_BUTTON").OnClick = OpenReplayBrowserPanel;
+			var replaysButton = extrasMenu.Get<ButtonWidget>("REPLAYS_BUTTON");
+			replaysButton.OnClick = OpenReplayBrowserPanel;
+			replaysButton.IsDisabled = () => !modData.MapCache.IsMapScanComplete;
 
 			extrasMenu.Get<ButtonWidget>("MUSIC_BUTTON").OnClick = () =>
 			{
@@ -148,7 +153,9 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 				});
 			};
 
-			extrasMenu.Get<ButtonWidget>("MAP_EDITOR_BUTTON").OnClick = () => SwitchMenu(MenuType.MapEditor);
+			var mapEditorButton = extrasMenu.Get<ButtonWidget>("MAP_EDITOR_BUTTON");
+			mapEditorButton.OnClick = () => SwitchMenu(MenuType.MapEditor);
+			mapEditorButton.IsDisabled = () => !modData.MapCache.IsMapScanComplete;
 
 			var assetBrowserButton = extrasMenu.GetOrNull<ButtonWidget>("ASSETBROWSER_BUTTON");
 			if (assetBrowserButton != null)
@@ -215,7 +222,8 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 				});
 			};
 
-			loadMapButton.Disabled = !hasMaps;
+			loadMapButton.IsDisabled = () => !modData.MapCache.IsMapScanComplete ||
+				!modData.MapCache.Any(p => p.Visibility.HasFlag(MapVisibility.Lobby));
 
 			mapEditorMenu.Get<ButtonWidget>("BACK_BUTTON").OnClick = () => SwitchMenu(MenuType.Extras);
 
@@ -594,6 +602,7 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 			SwitchMenu(MenuType.None);
 
 			var map = modData.MapCache.ChooseInitialMap(modData.MapCache.PickLastModifiedMap(MapVisibility.Lobby) ?? Game.Settings.Server.Map, Game.CosmeticRandom);
+			modData.MapCache.RememberLobbyMap(map);
 			Game.Settings.Server.Map = map;
 			Game.Settings.Save();
 
@@ -679,6 +688,15 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 
 		void OpenMenuBasedOnLastGame()
 		{
+			// The restored panels take snapshots of the map cache and may bypass the disabled menu buttons.
+			// Stay on the main menu until the background scan has published its complete snapshot.
+			if (!modData.MapCache.IsMapScanComplete)
+			{
+				lastGameState = MenuPanel.None;
+				SwitchMenu(MenuType.Main);
+				return;
+			}
+
 			switch (lastGameState)
 			{
 				case MenuPanel.Missions:

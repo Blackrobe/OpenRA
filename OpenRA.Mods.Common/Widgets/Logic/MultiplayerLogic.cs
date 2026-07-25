@@ -55,8 +55,12 @@ namespace OpenRA.Mods.Common.Widgets.Logic
 				});
 			};
 
-			var hasMaps = modData.MapCache.Any(p => !p.Visibility.HasFlag(MapVisibility.Shellmap));
-			createServerButton.Disabled = !hasMaps;
+			var createServerButtonText = createServerButton.GetText;
+			createServerButton.GetText = () => modData.MapCache.IsMapScanComplete
+				? createServerButtonText()
+				: FluentProvider.GetMessage("label-loading-maps");
+			createServerButton.IsDisabled = () => !modData.MapCache.IsMapScanComplete ||
+				!modData.MapCache.Any(p => !p.Visibility.HasFlag(MapVisibility.Shellmap));
 
 			widget.Get<ButtonWidget>("BACK_BUTTON").OnClick = () => { Ui.CloseWindow(); onExit(); };
 

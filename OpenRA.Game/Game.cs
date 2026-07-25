@@ -106,6 +106,7 @@ namespace OpenRA
 
 		public static void JoinReplay(string replayFile)
 		{
+			ModData.MapCache.CompleteMapScan(ModData);
 			JoinInner(new OrderManager(new ReplayConnection(replayFile)));
 		}
 
@@ -198,6 +199,8 @@ namespace OpenRA
 			if (preview.Status != MapStatus.Available)
 				throw new InvalidDataException($"Invalid map uid: {uid}");
 
+			// Stop background preview I/O before opening the selected map package.
+			ModData.MapCache.StopBackgroundMapScan();
 			StartGame(preview.ToMap(), type);
 		}
 
@@ -503,6 +506,7 @@ namespace OpenRA
 
 			if (ModData != null)
 			{
+				ModData.MapCache.StopBackgroundMapScan();
 				ModData.ModFiles.UnmountAll();
 				ModData.Dispose();
 			}
@@ -523,8 +527,8 @@ namespace OpenRA
 			ModData.InitializeLoaders(ModData.DefaultFileSystem);
 			Renderer.InitializeFonts(ModData);
 
-			using (new PerfTimer("LoadMaps"))
-				ModData.MapCache.LoadMaps(ModData);
+			using (new PerfTimer("LoadShellmaps"))
+				ModData.MapCache.LoadShellmaps(ModData);
 
 			Cursor?.Dispose();
 			Cursor = new CursorManager(ModData);
@@ -547,6 +551,7 @@ namespace OpenRA
 
 		public static void LoadEditor(string uid)
 		{
+			ModData.MapCache.CompleteMapScan(ModData);
 			JoinLocal();
 			StartGame(uid, WorldType.Editor);
 		}
@@ -565,6 +570,22 @@ namespace OpenRA
 				StartGame(shellmap, WorldType.Shellmap);
 				OnShellmapLoaded();
 			}
+
+			// Let the shellmap's short fade from black finish before starting the CPU and I/O heavy map scan.
+			// Guard against a mod switch or direct-connect flow during the delay.
+			var modData = ModData;
+			var shellmapWorld = worldRenderer?.World;
+			RunAfterDelay(1000, () =>
+			{
+				if (ReferenceEquals(ModData, modData) &&
+					ReferenceEquals(worldRenderer?.World, shellmapWorld) &&
+					shellmapWorld?.Type == WorldType.Shellmap &&
+					!modData.MapCache.IsMapScanComplete)
+				{
+					Log.Write("debug", "Starting background map scan after the menu fade.");
+					modData.MapCache.StartBackgroundMapScan(modData);
+				}
+			});
 		}
 
 		static string ChooseShellmap()
@@ -1041,6 +1062,7 @@ namespace OpenRA
 
 		public static void LoadMap(string launchMap)
 		{
+			ModData.MapCache.CompleteMapScan(ModData);
 			var orders = new List<Order>
 			{
 				Order.Command("option gamespeed default"),
